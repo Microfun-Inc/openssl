@@ -108,6 +108,9 @@ struct cms_key_param_st {
     cms_key_param *next;
 };
 
+static int add_sign_attr(STACK_OF(X509_ATTRIBUTE) **attrs,
+                         char * param);
+
 int MAIN(int, char **);
 
 int MAIN(int argc, char **argv)
@@ -153,6 +156,8 @@ int MAIN(int argc, char **argv)
     ASN1_OBJECT *econtent_type = NULL;
 
     X509_VERIFY_PARAM *vpm = NULL;
+
+    STACK_OF(X509_ATTRIBUTE) *sign_attrs = NULL;
 
     args = argv + 1;
     ret = 1;
@@ -511,6 +516,9 @@ int MAIN(int argc, char **argv)
             if (!args[1])
                 goto argerr;
             contfile = *++args;
+        } else if (!strcmp(*args, "-sign_attr")) {
+            if (!add_sign_attr(&sign_attrs, *++args))
+                goto argerr;
         } else if (args_verify(&args, NULL, &badarg, bio_err, &vpm))
             continue;
         else if ((cipher = EVP_get_cipherbyname(*args + 1)) == NULL)
@@ -614,6 +622,8 @@ int MAIN(int argc, char **argv)
         BIO_printf(bio_err, "-nodetach      use opaque signing\n");
         BIO_printf(bio_err,
                    "-noattr        don't include any signed attributes\n");
+        BIO_printf(bio_err,
+                   "-sign_attr arg Additional signer attribute. Applies to all signers.\n");
         BIO_printf(bio_err,
                    "-binary        don't translate message to text\n");
         BIO_printf(bio_err, "-certfile file other certificates file\n");
@@ -996,6 +1006,16 @@ int MAIN(int argc, char **argv)
             si = CMS_add1_signer(cms, signer, key, sign_md, tflags);
             if (!si)
                 goto end;
+            if (sign_attrs) {
+                for (i = 0; i < sk_X509_ATTRIBUTE_num(sign_attrs); i++) {
+                    X509_ATTRIBUTE * attr = sk_X509_ATTRIBUTE_value(sign_attrs, i);
+                    if (!CMS_signed_add1_attr(si, attr)) {
+                        BIO_puts(bio_err,
+                                 "Failed to add signed attribute\n");
+                        goto end;
+                    }
+                }
+            }
             if (kparam) {
                 EVP_PKEY_CTX *pctx;
                 pctx = CMS_SignerInfo_get0_pkey_ctx(si);
@@ -1167,6 +1187,7 @@ int MAIN(int argc, char **argv)
     X509_free(cert);
     X509_free(recip);
     X509_free(signer);
+    sk_X509_ATTRIBUTE_free(sign_attrs);
     EVP_PKEY_free(key);
     CMS_ContentInfo_free(cms);
     CMS_ContentInfo_free(rcms);
@@ -1353,6 +1374,100 @@ static int cms_set_pkey_param(EVP_PKEY_CTX *pctx,
         }
     }
     return 1;
+}
+
+static int add_sign_attr(STACK_OF(X509_ATTRIBUTE) **attrs,
+                         char * param)
+{
+    int ret = 0;
+    char *equal = NULL;
+    ASN1_OBJECT *obj = NULL;
+//    struct asn1_string_st * str;
+    ASN1_TYPE * parsed = NULL;
+    int type;
+
+    equal = strchr(param, '=');
+    if (equal == NULL)
+        goto end;
+
+    *equal = '\0';
+    obj = OBJ_txt2obj(param, 0);
+    *equal = '=';
+    if (obj == NULL)
+        goto end;
+
+    parsed = ASN1_generate_nconf(equal + 1, NULL);
+    if (parsed == NULL)
+        goto end;
+
+    type = ASN1_TYPE_get(parsed);
+    switch (type) {
+        case V_ASN1_BOOLEAN:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, (unsigned char *)&parsed->value.boolean, sizeof(parsed->value.boolean)) != NULL;
+            break;
+        // parsed->value.asn1_string?
+        //case V_ASN1_OBJECT:
+        //    ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.object->data, parsed->value.object->length) != NULL;
+        //    break;
+        case V_ASN1_INTEGER:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.integer->data, parsed->value.integer->length) != NULL;
+            break;
+        case V_ASN1_ENUMERATED:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.enumerated->data, parsed->value.enumerated->length) != NULL;
+            break;
+        case V_ASN1_BIT_STRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.bit_string->data, parsed->value.bit_string->length) != NULL;
+            break;
+        case V_ASN1_OCTET_STRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.octet_string->data, parsed->value.octet_string->length) != NULL;
+            break;
+        case V_ASN1_PRINTABLESTRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.printablestring->data, parsed->value.printablestring->length) != NULL;
+            break;
+        case V_ASN1_T61STRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.t61string->data, parsed->value.t61string->length) != NULL;
+            break;
+        case V_ASN1_IA5STRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.ia5string->data, parsed->value.ia5string->length) != NULL;
+            break;
+        case V_ASN1_GENERALSTRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.generalstring->data, parsed->value.generalstring->length) != NULL;
+            break;
+        case V_ASN1_BMPSTRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.bmpstring->data, parsed->value.bmpstring->length) != NULL;
+            break;
+        case V_ASN1_UNIVERSALSTRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.universalstring->data, parsed->value.universalstring->length) != NULL;
+            break;
+        case V_ASN1_UTCTIME:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.utctime->data, parsed->value.utctime->length) != NULL;
+            break;
+        case V_ASN1_GENERALIZEDTIME:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.generalizedtime->data, parsed->value.generalizedtime->length) != NULL;
+            break;
+        case V_ASN1_VISIBLESTRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.visiblestring->data, parsed->value.visiblestring->length) != NULL;
+            break;
+        case V_ASN1_UTF8STRING:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.utf8string->data, parsed->value.utf8string->length) != NULL;
+            break;
+        case V_ASN1_SET:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.set->data, parsed->value.set->length) != NULL;
+            break;
+        case V_ASN1_SEQUENCE:
+            ret = X509at_add1_attr_by_OBJ(attrs, obj, type, parsed->value.sequence->data, parsed->value.sequence->length) != NULL;
+            break;
+    }
+
+
+end:
+    if (obj != NULL)
+        ASN1_OBJECT_free(obj);
+
+    if (parsed != NULL)
+        ASN1_TYPE_free(parsed);
+
+    return ret;
 }
 
 #endif
